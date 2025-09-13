@@ -20,8 +20,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 
-# -------------------- 配置（请确认） --------------------
-BOT_TOKEN = "8216980791:AAEvQLePTqhPimv_PqB47LgNcw77GyxIzig"  # ← 请确认/替换为你的 bot token
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Railway 里设置 BOT_TOKEN
 OWNER_USERNAME = "yeguanzhu"   # 主人用户名（不带 @）
 OWNER_ID = 8166725099          # 主人数字 ID（双保险）
 
