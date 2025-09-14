@@ -1,56 +1,129 @@
-import os
-import logging
-import threading
-import asyncio
-import time
-import queue
-import datetime
-import requests
+# ========== imghdr 兼容补丁 ==========
+import sys
+import types
+
+if "imghdr" not in sys.modules:
+    fake_imghdr = types.ModuleType("imghdr")
+    fake_imghdr.what = lambda file, h=None: None
+    sys.modules["imghdr"] = fake_imghdr
+# ====================================
+
 import re
+import requests
 import base64
 import hashlib
 import json
-from flask import Flask
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, ContextTypes, filters
+import time
+import threading
+from queue import Queue
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
+from telegram.ext import Updater, CommandHandler
+import os
+from flask import Flask, request
+from threading import Thread
 
-# ============ 日志 ============
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# ============ 今日语录 ============
+# ===================== 保活服务 =====================
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "🤖 Bot is alive! 访问 /keepalive 获取保活说明"
+
+@app.route('/keepalive')
+def keepalive_page():
+    host = request.host
+    url = f"https://{host}/keepalive"
+    return f"""
+    <html>
+    <head><title>保活说明</title></head>
+    <body style="font-family:Arial; text-align:center; margin-top:50px;">
+        <h2>🚀 保活设置</h2>
+        <p>请复制此页面的网址，粘贴到 <a href="https://uptimerobot.com" target="_blank">UptimeRobot</a> 监控服务</p>
+        <p>监控类型：HTTP(s)</p>
+        <p>监控地址：<b>{url}</b></p>
+        <p>建议监控间隔：5分钟</p>
+        <hr>
+        <p style="color:gray;">本页面用于保持 Replit Bot 长期在线</p>
+    </body>
+    </html>
+    """
+
+def run():
+    app.run(host="0.0.0.0", port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.daemon = True
+    t.start()
+# ==============================
+
+
+# ===================== 每日语录 =====================
 def fetch_quote():
     url = "https://v.api.aa1.cn/api/api-wenan-aiqing/index.php?type=json"
     try:
         r = requests.get(url, timeout=6)
-        j = r.json()
+        text = r.text.strip()
+        try:
+            j = json.loads(text)
+        except Exception:
+            return "🎵 今日语录获取失败"
+
         if isinstance(j, dict):
-            for key in ("text","content","msg"):
-                if j.get(key):
-                    return f"🎵 今日语录：{j[key]}"
+            for key in ("text", "content", "msg"):
+                val = j.get(key)
+                if val:
+                    return f"🎵 今日语录：{val}"
+
         if isinstance(j, list) and j and isinstance(j[0], dict):
-            for key in ("content","text","msg"):
-                if j[0].get(key):
-                    return f"🎵 今日语录：{j[0][key]}"
+            for key in ("content", "text", "msg"):
+                val = j[0].get(key)
+                if val:
+                    return f"🎵 今日语录：{val}"
+
         return "🎵 今日语录获取失败"
-    except:
+    except Exception:
         return "🎵 今日语录获取失败"
 
-# ============ 京东核验 API ============
+
+# ===================== 工具函数 =====================
+def calculate_check_code(id_17):
+    weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+    check_codes = "10X98765432"
+    total = sum(int(a) * b for a, b in zip(id_17, weights))
+    return check_codes[total % 11]
+
+
+def generate_all_valid_ids(partial_id, gender):
+    base = partial_id[:14]
+    valid_ids = []
+    for seq in range(0, 1000):
+        seq_str = f"{seq:03d}"
+        last_digit = int(seq_str[2])
+        if (gender == '男' and last_digit % 2 == 1) or \
+           (gender == '女' and last_digit % 2 == 0) or \
+           gender == '未知':
+            full_17 = base + seq_str
+            check_code = calculate_check_code(full_17)
+            full_id = full_17 + check_code
+            valid_ids.append(full_id)
+    return valid_ids
+
+
+# ===================== 公安核验封装类 =====================
 class Batch2YS:
     def __init__(self):
-        self.RsaPubKeyStr = (
-            "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCWmc4bKr/RQloO3SBk0PMdNTgxWwKwJNStiZXYX41bCFfgGI5P4tKNsxkv2JKjQpmXkchOiUT2/"
-            "hQB6dOtDaKuvfbWRpSoEDNyTVZdavQ9Ubrh3gU0WojRyiN4ytEDOUW8G2Y59UIPZJhItUllkEwT5JlbIofLD3Aq3OZCI0VbUQIDAQAB"
-        )
+        self.RsaPubKeyStr = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCWmc4bKr/RQloO3SBk0PMdNTgxWwKwJNStiZXYX41bCFfgGI5P4tKNsxkv2JKjQpmXkchOiUT2/hQB6dOtDaKuvfbWRpSoEDNyTVZdavQ9Ubrh3gU0WojRyiN4ytEDOUW8G2Y59UIPZJhItUllkEwT5JlbIofLD3Aq3OZCI0VbUQIDAQAB"
         key_der = base64.b64decode(self.RsaPubKeyStr)
         self.public_key = RSA.importKey(key_der)
         self.cipher = PKCS1_v1_5.new(self.public_key)
 
     def encrypt_rsa(self, text):
-        return base64.b64encode(self.cipher.encrypt(text.encode("utf-8"))).decode("utf-8")
+        text_bytes = text.encode("utf-8")
+        encrypted_bytes = self.cipher.encrypt(text_bytes)
+        return base64.b64encode(encrypted_bytes).decode("utf-8")
 
     def compute_md5(self, text):
         return hashlib.md5(text.encode("utf-8")).hexdigest()
@@ -77,11 +150,11 @@ class Batch2YS:
         }
         url = "https://m.jdallianz.com/c/api/360/tools/realName/verify"
         try:
-            response = requests.post(url, data=json.dumps(payload), headers=headers, timeout=5)
+            session = requests.Session()
+            response = session.post(url, data=json.dumps(payload), headers=headers, timeout=5)
             response.raise_for_status()
             return response.text
-        except Exception as e:
-            logger.error(f"核验请求异常: {e}")
+        except Exception:
             return None
 
     def verify_id(self, realName, idCard):
@@ -94,247 +167,239 @@ class Batch2YS:
         except:
             return False
 
-# ============ 工具 ============
-def extract_chinese(response_json):
-    if not response_json:
-        return ""
-    parts = []
-    if "msg" in response_json:
-        parts.append(response_json["msg"])
-    if "data" in response_json and isinstance(response_json, dict):
-        for v in response_json["data"].values():
-            if v:
-                parts.append(str(v))
-    chinese = []
-    for p in parts:
-        seq = re.findall(r"[\u4e00-\u9fff]+", str(p))
-        if seq:
-            chinese.append("".join(seq))
-    return " ".join(chinese)
 
-def calculate_check_code(id17):
-    weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
-    codes = "10X98765432"
-    return codes[sum(int(a) * b for a, b in zip(id17, weights)) % 11]
+def query_id_info(id_card):
+    try:
+        url = f"https://zj.v.api.aa1.cn/api/sfz/?sfz={id_card}"
+        resp = requests.get(url, timeout=5)
+        return resp.json()
+    except Exception as e:
+        return {"error": str(e)}
 
-def generate_all_valid_ids(partial_id, gender):
-    base = partial_id[:14]
-    valid_ids = []
-    for seq in range(0, 1000):
-        s = f"{seq:03d}"
-        last = int(s[2])
-        if (gender == "男" and last % 2 == 1) or (gender == "女" and last % 2 == 0) or (gender == "未知"):
-            id17 = base + s
-            valid_ids.append(id17 + calculate_check_code(id17))
-    return valid_ids
 
-# ============ 多线程 Worker ============
+# ===================== 多线程 Worker =====================
 class WorkerThread(threading.Thread):
-    def __init__(self, task_q, result_q, name):
-        super().__init__(daemon=True)
-        self.task_q, self.result_q, self.name = task_q, result_q, name
+    def __init__(self, task_queue, real_name, result_queue):
+        super().__init__()
+        self.task_queue = task_queue
+        self.real_name = real_name
+        self.result_queue = result_queue
         self.verifier = Batch2YS()
+        self.daemon = True
+
     def run(self):
         while True:
-            id_card = self.task_q.get()
+            id_card = self.task_queue.get()
             if id_card is None:
+                self.task_queue.task_done()
                 break
-            if not self.result_q.empty():
-                break
-            if self.verifier.verify_id(self.name, id_card):
-                try:
-                    resp = requests.get(f"https://zj.v.api.aa1.cn/api/sfz/?sfz={id_card}", timeout=5)
-                    resp_json = resp.json() if resp.status_code == 200 else None
-                except:
-                    resp_json = None
-                chinese_text = extract_chinese(resp_json)
-                self.result_q.put((id_card, chinese_text))
-            self.task_q.task_done()
+            if self.result_queue.empty():
+                success = self.verifier.verify_id(self.real_name, id_card)
+                if success:
+                    self.result_queue.put(id_card)
+            self.task_queue.task_done()
 
-# ============ 授权系统 ============
-authorized_users = {"yeguanzhu"}
-usage_records = {}
 
-def is_authorized(username): return username in authorized_users
+# ===================== 授权管理 =====================
+OWNER_USERNAME = "yeguanzhu"
+AUTHORIZED_USERS = set()
 
-def check_usage_limit(username, command):
-    today = datetime.date.today()
-    if is_authorized(username):
-        return True
-    rec = usage_records.get(username, {})
-    if rec.get(command) == today:
+def check_auth(update):
+    user = update.effective_user
+    if not user:
         return False
-    usage_records.setdefault(username, {})[command] = today
-    return True
+    if user.username == OWNER_USERNAME:
+        return True
+    return user.username in AUTHORIZED_USERS
 
-# ============ Telegram 对话状态 ============
-BQ_ID, BQ_GENDER, BQ_NAME = range(3)
+def require_auth(func):
+    def wrapper(update, context, *args, **kwargs):
+        if not check_auth(update):
+            update.message.reply_text("⚠️ 未授权用户，禁止使用！")
+            return
+        return func(update, context, *args, **kwargs)
+    return wrapper
 
-# ============ /bq 核验线程 ============
-def do_bq_verification(chat_id, partial_id, gender, name, thread_count, bot, loop):
-    start = time.time()
-    all_ids = generate_all_valid_ids(partial_id, gender)
-    task_q, result_q = queue.Queue(), queue.Queue()
-    total = len(all_ids)
-    for i in all_ids: task_q.put(i)
-    threads = [WorkerThread(task_q, result_q, name) for _ in range(thread_count)]
-    for t in threads: t.start()
-
-    stop_flag = threading.Event()
-
-    # 进度提示线程
-    def progress_reporter():
-        while not stop_flag.is_set():
-            done = total - task_q.qsize()
-            msg = f"🐿️ 正在核验中...\n已完成 {done}/{total}"
-            asyncio.run_coroutine_threadsafe(
-                bot.send_message(chat_id=chat_id, text=msg),
-                loop
-            )
-            time.sleep(3)
-
-    prog_thread = threading.Thread(target=progress_reporter, daemon=True)
-    prog_thread.start()
-
-    success = None
-    end_time = time.time() + 30
-    while time.time() < end_time:
-        try:
-            sid, chinese = result_q.get(timeout=1)
-            success = (sid, chinese)
-            break
-        except queue.Empty:
-            continue
-
-    stop_flag.set()
-    prog_thread.join(timeout=1)
-    for _ in threads: task_q.put(None)
-    for t in threads: t.join(timeout=1)
-
-    elapsed = time.time() - start
-    if success:
-        sid, chinese = success
-        msg = f"🐿️ 核验成功 🐿️\n🧑 姓名：{name}\n🪪 身份证：{sid}\n⏱️ 用时：{elapsed:.2f}秒\n🐥 接口响应：{chinese}"
-    else:
-        msg = f"🐿️ 核验失败 🐿️\n🧑 姓名：{name}\n🪪 身份证：{partial_id}\n⏱️ 用时：{elapsed:.2f}秒\n🐥 接口响应：未找到有效身份证"
-
-    asyncio.run_coroutine_threadsafe(bot.send_message(chat_id=chat_id, text=msg), loop)
-
-# ============ /bq 流程 ============
-async def bq_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user
-    username = (u.username or "").strip("@")
-    if not username:
-        await update.message.reply_text("请先设置 Telegram 用户名")
-        return ConversationHandler.END
-    if not check_usage_limit(username, "bq"):
-        await update.message.reply_text("未授权用户每天只能用一次，请联系 @yeguanzhu 授权")
-        return ConversationHandler.END
-    context.user_data.clear()
-    await update.message.reply_text("请输入14位身份证号：", reply_markup=ReplyKeyboardRemove())
-    return BQ_ID
-
-async def bq_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if not text.isdigit() or len(text) != 14:
-        await update.message.reply_text("身份证号应为14位数字")
-        return BQ_ID
-    context.user_data["partial_id"] = text
-    await update.message.reply_text("请选择性别：", reply_markup=ReplyKeyboardMarkup([["男","女","未知"]], one_time_keyboard=True))
-    return BQ_GENDER
-
-async def bq_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    g = update.message.text.strip()
-    if g not in ["男","女","未知"]:
-        await update.message.reply_text("请选择有效性别")
-        return BQ_GENDER
-    context.user_data["gender"] = g
-    await update.message.reply_text("请输入姓名：")
-    return BQ_NAME
-
-async def bq_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.message.text.strip()
-    if not name:
-        await update.message.reply_text("姓名不能为空")
-        return BQ_NAME
-    context.user_data["name"] = name
-    await update.message.reply_text("开始核验（固定 20 线程），请稍候...")
-    loop = asyncio.get_event_loop()
-    threading.Thread(
-        target=do_bq_verification,
-        args=(update.effective_chat.id,
-              context.user_data["partial_id"],
-              context.user_data["gender"],
-              context.user_data["name"],
-              20,
-              context.bot,
-              loop)
-    ).start()
-    return ConversationHandler.END
-
-# ============ /start ============
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    quote = fetch_quote()
-    await update.message.reply_text(quote)
-    await asyncio.sleep(3)
-    await update.message.reply_text(
-        "🐿️ 身份证核验机器人 🐿️\n"
-        "可用指令：\n"
-        "/bq   输入14位身份证 → 自动补齐 → 多线程核验\n"
-        "/sq   超管授权指定用户\n"
-        "/help 显示帮助信息"
-    )
-
-# ============ /sq 授权 ============
-async def sq(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user
-    username = (u.username or "").strip("@")
-    if not is_authorized(username):
-        await update.message.reply_text("只有超级管理员可以授权")
+def sq_cmd(update, context):
+    user = update.effective_user
+    if user.username != OWNER_USERNAME:
+        update.message.reply_text("⚠️ 只有主人才能授权！")
         return
     if not context.args:
-        await update.message.reply_text("用法：/sq 用户名")
+        update.message.reply_text("用法: /sq <用户名>")
         return
-    target = context.args[0].strip("@")
-    if not target:
-        await update.message.reply_text("用户名不能为空")
+    target_username = context.args[0].lstrip("@")
+    AUTHORIZED_USERS.add(target_username)
+    update.message.reply_text(f"✅ 已授权 @{target_username} 使用机器人")
+
+def unauth_cmd(update, context):
+    user = update.effective_user
+    if user.username != OWNER_USERNAME:
+        update.message.reply_text("⚠️ 只有主人才能取消授权！")
         return
-    authorized_users.add(target)
-    await update.message.reply_text(f"已成功授权用户：{target}")
+    if not context.args:
+        update.message.reply_text("用法: /unauth <用户名>")
+        return
+    target_username = context.args[0].lstrip("@")
+    if target_username in AUTHORIZED_USERS:
+        AUTHORIZED_USERS.remove(target_username)
+        update.message.reply_text(f"❌ 已移除 @{target_username} 的授权")
+    else:
+        update.message.reply_text(f"ℹ️ 用户 @{target_username} 不在授权列表中")
 
-# ============ Flask 保活 ============
-app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "Bot is running 🐿️", 200
+# ===================== Telegram Bot =====================
+TOKEN = os.environ.get("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("❌ 未检测到 BOT_TOKEN，请在 Replit Secrets 设置 BOT_TOKEN")
 
-def run_flask():
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host="0.0.0.0", port=port)
 
-# ============ 启动机器人 ============
-def run_telegram():
-    TOKEN = os.environ.get("BOT_TOKEN")
-    if not TOKEN:
-        raise RuntimeError("请在 Glitch 的 .env 设置 BOT_TOKEN")
-    application = Application.builder().token(TOKEN).build()
-    bq_conv = ConversationHandler(
-        entry_points=[CommandHandler("bq", bq_start)],
-        states={
-            BQ_ID:[MessageHandler(filters.TEXT & ~filters.COMMAND, bq_id)],
-            BQ_GENDER:[MessageHandler(filters.TEXT & ~filters.COMMAND, bq_gender)],
-            BQ_NAME:[MessageHandler(filters.TEXT & ~filters.COMMAND, bq_name)],
-        },
-        fallbacks=[]
+@require_auth
+def start(update, context):
+    quote = fetch_quote()
+    msg = (
+        "👋 欢迎使用【身份证核验机器人】\n\n"
+        f"{quote}\n\n"
+        "📌 指令说明：\n"
+        "🔄 /bq <14位号码> <姓名> <性别> - 补齐并批量核验身份证 (20线程, 显示耗时+进度条)\n"
+        "✅ /hy <18位号码> <姓名> - 直接核验身份证 (单次, 不显示耗时)\n"
+        "🛡️ /sq <用户名> - 主人授权用户\n"
+        "🛑 /unauth <用户名> - 主人移除授权\n"
+        "ℹ️ /help - 查看帮助\n"
     )
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("sq", sq))
-    application.add_handler(bq_conv)
-    application.run_polling()
+    update.message.reply_text(msg)
 
-# ============ 主入口 ============
+
+@require_auth
+def help_cmd(update, context):
+    update.message.reply_text(
+        "📖 使用说明：\n"
+        "➡️ /bq 41010219900101 张三 男\n"
+        "➡️ /hy 41010219900101003X 张三\n"
+        "➡️ /sq @username (主人专用授权)\n"
+        "➡️ /unauth @username (主人专用移除授权)\n"
+    )
+
+
+@require_auth
+def bq_cmd(update, context):
+    if len(context.args) < 3:
+        update.message.reply_text("⚠️ 格式错误，请使用：/bq <14位号码> <姓名> <性别>")
+        return
+
+    partial_id, name, gender = context.args[0], context.args[1], context.args[2]
+    all_ids = generate_all_valid_ids(partial_id, gender)
+    total_ids = len(all_ids)
+
+    task_queue = Queue()
+    result_queue = Queue()
+    for id_num in all_ids:
+        task_queue.put(id_num)
+
+    # 固定 20 线程
+    threads = []
+    for _ in range(20):
+        t = WorkerThread(task_queue, name, result_queue)
+        t.start()
+        threads.append(t)
+
+    start_time = time.time()
+    progress_msg = update.message.reply_text(
+        f"🔄 开始补齐并核验，共 {total_ids} 个候选号码...\n⏳ 进度: 0%"
+    )
+
+    last_update = time.time()
+
+    while not task_queue.empty():
+        time.sleep(0.2)
+        remaining = task_queue.qsize()
+        checked = total_ids - remaining
+        percent = int((checked / total_ids) * 100)
+
+        if time.time() - last_update > 1:
+            bar_len = 20
+            filled = int(bar_len * percent / 100)
+            bar = "█" * filled + "-" * (bar_len - filled)
+            try:
+                progress_msg.edit_text(
+                    f"🔄 补齐核验中...\n"
+                    f"[{bar}] {percent}%\n"
+                    f"✅ 已核验: {checked}/{total_ids}"
+                )
+            except Exception:
+                pass
+            last_update = time.time()
+
+        if not result_queue.empty():
+            break
+
+    task_queue.join()
+    for _ in range(20):
+        task_queue.put(None)
+    for t in threads:
+        t.join()
+
+    elapsed = time.time() - start_time
+
+    if not result_queue.empty():
+        success_id = result_queue.get()
+        info = query_id_info(success_id)
+        progress_msg.edit_text(
+            f"✅ 核验成功！\n"
+            f"👤 姓名: {name}\n"
+            f"🆔 身份证: {success_id}\n"
+            f"⏱️ 补齐耗时: {elapsed:.1f} 秒\n\n"
+            f"📄 信息:\n{json.dumps(info, ensure_ascii=False, indent=2)}"
+        )
+    else:
+        progress_msg.edit_text(
+            f"❌ 所有组合核验失败\n⏱️ 总耗时: {elapsed:.1f} 秒"
+        )
+
+
+@require_auth
+def hy_cmd(update, context):
+    if len(context.args) < 2:
+        update.message.reply_text("⚠️ 格式错误，请使用：/hy <18位号码> <姓名>")
+        return
+
+    id_card, name = context.args[0], context.args[1]
+    verifier = Batch2YS()
+    update.message.reply_text(f"🔍 正在核验 {id_card} ...")
+
+    if verifier.verify_id(name, id_card):
+        info = query_id_info(id_card)
+        update.message.reply_text(
+            f"✅ 核验成功！\n"
+            f"👤 姓名: {name}\n"
+            f"🆔 身份证: {id_card}\n\n"
+            f"📄 信息:\n{json.dumps(info, ensure_ascii=False, indent=2)}"
+        )
+    else:
+        update.message.reply_text("❌ 核验失败")
+
+
+# ===================== 主函数 =====================
+def main():
+    print("🤖 Bot 启动中...")
+    print(fetch_quote())
+
+    keep_alive()   # 启动保活
+
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("sq", sq_cmd))
+    dp.add_handler(CommandHandler("unauth", unauth_cmd))
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("help", help_cmd))
+    dp.add_handler(CommandHandler("bq", bq_cmd))
+    dp.add_handler(CommandHandler("hy", hy_cmd))
+
+    print("🚀 Bot 已上线，等待指令...")
+    updater.start_polling()
+    updater.idle()
+
+
 if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    run_telegram()
+    main()
